@@ -230,6 +230,7 @@ fun NeonPadConsoleScreen(
                     onMakeDiscoverable = makeDiscoverable,
                     onConnectPairedHost = { addr -> viewModel.btHidManager.connectToPairedHost(addr) },
                     onDisconnectHost = { viewModel.btHidManager.disconnectCurrentHost() },
+                    onSelectOutputMode = { mode -> viewModel.btHidManager.setOutputMode(mode) },
                     onRefreshNetwork = { viewModel.webBridgeServer.refreshLocalIp() },
                     onDismiss = viewModel::closeModal
                 )

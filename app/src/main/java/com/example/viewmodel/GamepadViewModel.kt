@@ -303,8 +303,9 @@ class GamepadViewModel(application: Application) : AndroidViewModel(application)
             right = PsButton.DPAD_RIGHT in effectiveBtns
         )
 
-        // Dispatch to native Bluetooth HID Gamepad if connected
-        btHidManager.sendGamepadReport(
+        // Dispatch composite HID reports (Gamepad + WASD Keyboard + Mouse Aim) to connected Windows PC
+        btHidManager.sendCompositeInput(
+            effectiveButtons = effectiveBtns,
             buttonMask16 = buttonMask,
             hatSwitchValue = hatSwitch,
             leftX = effLx,

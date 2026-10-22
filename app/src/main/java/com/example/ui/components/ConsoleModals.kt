@@ -100,6 +100,7 @@ fun ConnectionHubModal(
     onMakeDiscoverable: () -> Unit,
     onConnectPairedHost: (String) -> Unit,
     onDisconnectHost: () -> Unit,
+    onSelectOutputMode: (com.example.hardware.BtHidOutputMode) -> Unit,
     onRefreshNetwork: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -211,8 +212,55 @@ fun ConnectionHubModal(
                 Text(
                     text = btStatus.statusDetail,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondarySlate
+                    color = if (btStatus.connectedHostAddress != null) ConnectedGreen else TurboAmber
                 )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Mandatory Windows Bluetooth Pairing Explanation Box
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(ObsidianBlack)
+                        .border(1.dp, TurboAmber.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = "⚠️ WHY WINDOWS / GAMEPAD TESTER DOESN'T SEE YOUR PHONE YET (3-STEP FIX):",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TurboAmber
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "If you paired your phone to DESKTOP-0AJQGJD BEFORE opening NeonPad, Windows saved your phone as 'Audio/Phone Only' and blocks Gamepad connections.\n" +
+                            "1. Tap 'Activate HID Gamepad' then 'Make Discoverable' below.\n" +
+                            "2. On your Windows laptop: Settings -> Bluetooth & devices -> Remove/Unpair your phone.\n" +
+                            "3. Click 'Add device -> Bluetooth' on Windows while this screen is open. Windows will now install the 'Wireless Controller' Gamepad driver!",
+                        fontSize = 11.sp,
+                        color = TextPrimaryWhite
+                    )
+                }
+
+                if (btStatus.diagnosticLogs.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(ObsidianBlack)
+                            .padding(8.dp)
+                    ) {
+                        btStatus.diagnosticLogs.takeLast(4).forEach { logLine ->
+                            Text(
+                                text = logLine,
+                                fontSize = 9.sp,
+                                color = NeonCyan
+                            )
+                        }
+                    }
+                }
 
                 if (btStatus.reportsSentCount > 0) {
                     Spacer(modifier = Modifier.height(4.dp))
@@ -221,6 +269,51 @@ fun ConnectionHubModal(
                         style = MaterialTheme.typography.labelSmall,
                         color = ConnectedGreen
                     )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Output Mode Selector (Universal Hybrid vs Pure Gamepad vs WASD+Mouse)
+                Text(
+                    text = "Bluetooth HID Output Mode:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NeonCyan
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    com.example.hardware.BtHidOutputMode.entries.forEach { mode ->
+                        val selected = btStatus.outputMode == mode
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (selected) NeonCyan else CarbonElevated)
+                                .border(
+                                    1.dp,
+                                    if (selected) NeonCyan else DeckBorderIdle,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable {
+                                    onSelectOutputMode(mode)
+                                }
+                                .padding(horizontal = 6.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = when (mode) {
+                                    com.example.hardware.BtHidOutputMode.HYBRID_ALL -> "HYBRID (ALL)"
+                                    com.example.hardware.BtHidOutputMode.GAMEPAD_ONLY -> "GAMEPAD"
+                                    com.example.hardware.BtHidOutputMode.KEYBOARD_MOUSE_ONLY -> "WASD + MOUSE"
+                                },
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (selected) ObsidianBlack else TextPrimaryWhite
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
@@ -271,7 +364,7 @@ fun ConnectionHubModal(
                 if (btStatus.pairedHosts.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Paired Bluetooth Devices (Tap your Windows Laptop):",
+                        text = "Paired Bluetooth Devices (Tap Connect PC — Auto-activates HID):",
                         style = MaterialTheme.typography.labelSmall,
                         color = NeonCyan
                     )
@@ -319,7 +412,7 @@ fun ConnectionHubModal(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Section B: Zero-Install Wi-Fi Web Bridge
+            // Section B: Zero-Install Wi-Fi Web & Windows OS Game Bridge
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -327,7 +420,7 @@ fun ConnectionHubModal(
                     .background(CarbonSurface)
                     .border(
                         1.dp,
-                        if (webState.connectedClients > 0) ConnectedGreen else NeonCyan.copy(alpha = 0.5f),
+                        if (webState.osInjectorClients > 0 || webState.connectedClients > 0) ConnectedGreen else NeonCyan.copy(alpha = 0.5f),
                         RoundedCornerShape(14.dp)
                     )
                     .padding(14.dp)
@@ -343,7 +436,7 @@ fun ConnectionHubModal(
                     ) {
                         Icon(Icons.Default.Wifi, contentDescription = null, tint = NeonCyan)
                         Text(
-                            text = "2. ZERO-INSTALL WI-FI WEB BRIDGE",
+                            text = "2. WI-FI WINDOWS OS GAME BRIDGE",
                             style = MaterialTheme.typography.titleMedium,
                             color = TextPrimaryWhite
                         )
@@ -353,10 +446,10 @@ fun ConnectionHubModal(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (webState.connectedClients > 0) {
-                                "${webState.connectedClients} PC LIVE"
-                            } else {
-                                "SERVER ONLINE"
+                            text = when {
+                                webState.osInjectorClients > 0 -> "OS GAME BRIDGE LIVE"
+                                webState.connectedClients > 0 -> "${webState.connectedClients} BROWSER LIVE"
+                                else -> "SERVER ONLINE"
                             },
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
@@ -378,7 +471,7 @@ fun ConnectionHubModal(
 
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Open this URL in Chrome or Edge on your Windows laptop (same Wi-Fi or phone hotspot) for instant zero-install controller streaming & browser gamepad emulation:",
+                    text = "To control external PC Games, Steam & Windows Desktop over Wi-Fi: open this URL on your laptop and click the yellow '1-Click Launcher (NeonPad-PC-Bridge.bat)' or paste the Win+R command shown on the page:",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondarySlate
                 )
@@ -421,9 +514,9 @@ fun ConnectionHubModal(
 
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "WebSocket Frames Broadcasted: ${webState.framesBroadcasted} | Active Browser Clients: ${webState.connectedClients}",
+                    text = "OS Game Injector Clients: ${webState.osInjectorClients} | Browser Clients: ${webState.connectedClients} | Frames Sent: ${webState.framesBroadcasted}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (webState.connectedClients > 0) ConnectedGreen else TextSecondarySlate
+                    color = if (webState.osInjectorClients > 0) ConnectedGreen else TurboAmber
                 )
             }
         }

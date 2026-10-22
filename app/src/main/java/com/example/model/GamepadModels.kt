@@ -9,6 +9,13 @@ import com.example.ui.theme.PsSquarePink
 import com.example.ui.theme.PsTriangleGreen
 import com.example.ui.theme.TurboAmber
 
+/**
+ * PlayStation Controller Buttons mapped to the W3C / Windows Standard 16-Button Gamepad layout:
+ * B0=Cross, B1=Circle, B2=Square, B3=Triangle,
+ * B4=L1, B5=R1, B6=L2, B7=R2,
+ * B8=Share, B9=Options, B10=L3, B11=R3,
+ * B12=D-Pad Up, B13=D-Pad Down, B14=D-Pad Left, B15=D-Pad Right
+ */
 enum class PsButton(
     val id: String,
     val label: String,
@@ -17,24 +24,24 @@ enum class PsButton(
     val defaultPcKey: String,
     val accentColor: Color
 ) {
-    CROSS("CROSS", "Cross", "✕", 0, "Space / A", PsCrossBlue),
-    CIRCLE("CIRCLE", "Circle", "◯", 1, "Left Ctrl / B", PsCircleRed),
-    SQUARE("SQUARE", "Square", "▢", 2, "R / X", PsSquarePink),
-    TRIANGLE("TRIANGLE", "Triangle", "△", 3, "F / Y", PsTriangleGreen),
-    L1("L1", "L1 Bumper", "L1", 4, "Q / LB", NeonCyan),
-    R1("R1", "R1 Bumper", "R1", 5, "E / RB", NeonCyan),
-    L2_BTN("L2_BTN", "L2 Trigger", "L2", 6, "Right Click / LT", NeonAzure),
-    R2_BTN("R2_BTN", "R2 Trigger", "R2", 7, "Left Click / RT", NeonAzure),
-    SHARE("SHARE", "Create / Share", "SHARE", 8, "Tab / View", NeonCyan),
-    OPTIONS("OPTIONS", "Options", "OPT", 9, "Esc / Menu", NeonCyan),
-    L3("L3", "Left Stick Click", "L3", 10, "Shift / LS", NeonCyan),
-    R3("R3", "Right Stick Click", "R3", 11, "V / RS", NeonCyan),
-    PS_HOME("PS_HOME", "PS Home", "PS", 12, "Win+G / Guide", TurboAmber),
-    TOUCHPAD("TOUCHPAD", "Touchpad Click", "TPAD", 13, "M / Map", NeonAzure),
-    DPAD_UP("DPAD_UP", "D-Pad Up", "▲", 14, "Up Arrow", NeonCyan),
-    DPAD_DOWN("DPAD_DOWN", "D-Pad Down", "▼", 15, "Down Arrow", NeonCyan),
-    DPAD_LEFT("DPAD_LEFT", "D-Pad Left", "◀", 16, "Left Arrow", NeonCyan),
-    DPAD_RIGHT("DPAD_RIGHT", "D-Pad Right", "▶", 17, "Right Arrow", NeonCyan)
+    CROSS("CROSS", "Cross", "✕", 0, "Space / A (B0)", PsCrossBlue),
+    CIRCLE("CIRCLE", "Circle", "◯", 1, "Left Ctrl / B (B1)", PsCircleRed),
+    SQUARE("SQUARE", "Square", "▢", 2, "R / X (B2)", PsSquarePink),
+    TRIANGLE("TRIANGLE", "Triangle", "△", 3, "F / Y (B3)", PsTriangleGreen),
+    L1("L1", "L1 Bumper", "L1", 4, "Q / LB (B4)", NeonCyan),
+    R1("R1", "R1 Bumper", "R1", 5, "E / RB (B5)", NeonCyan),
+    L2_BTN("L2_BTN", "L2 Trigger", "L2", 6, "Right Click / LT (B6)", NeonAzure),
+    R2_BTN("R2_BTN", "R2 Trigger", "R2", 7, "Left Click / RT (B7)", NeonAzure),
+    SHARE("SHARE", "Create / Share", "SHARE", 8, "Tab / View (B8)", NeonCyan),
+    OPTIONS("OPTIONS", "Options", "OPT", 9, "Esc / Menu (B9)", NeonCyan),
+    L3("L3", "Left Stick Click", "L3", 10, "Shift / LS (B10)", NeonCyan),
+    R3("R3", "Right Stick Click", "R3", 11, "V / RS (B11)", NeonCyan),
+    DPAD_UP("DPAD_UP", "D-Pad Up", "▲", 12, "Up Arrow (B12)", NeonCyan),
+    DPAD_DOWN("DPAD_DOWN", "D-Pad Down", "▼", 13, "Down Arrow (B13)", NeonCyan),
+    DPAD_LEFT("DPAD_LEFT", "D-Pad Left", "◀", 14, "Left Arrow (B14)", NeonCyan),
+    DPAD_RIGHT("DPAD_RIGHT", "D-Pad Right", "▶", 15, "Right Arrow (B15)", NeonCyan),
+    PS_HOME("PS_HOME", "PS Home", "PS", 9, "Enter / Guide", TurboAmber),
+    TOUCHPAD("TOUCHPAD", "Touchpad Click", "TPAD", 8, "M / Map", NeonAzure)
 }
 
 enum class ControlClusterId(val title: String) {

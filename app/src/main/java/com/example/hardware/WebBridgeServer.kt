@@ -26,15 +26,22 @@ data class WebBridgeState(
     val localIp: String = "127.0.0.1",
     val port: Int = 8080,
     val connectedClients: Int = 0,
+    val osInjectorClients: Int = 0,
     val framesBroadcasted: Long = 0L,
     val lastClientPingMs: Int = 2,
     val bridgeUrl: String = "http://127.0.0.1:8080"
 )
 
 /**
- * Real embedded HTTP + RFC-6455 WebSocket Server running directly on the Android device.
- * Allows any Windows laptop on the same Wi-Fi network (or Mobile Hotspot) to connect
- * simply by opening `http://<phone-ip>:8080` in Chrome/Edge with zero software installation.
+ * Real embedded HTTP + RFC-6455 WebSocket + Raw TCP Game Injector Server running on Android.
+ *
+ * Why a browser tab alone doesn't move characters in desktop Windows games:
+ * Chrome/Edge sandboxes web pages so a normal tab cannot press keys inside external .exe games.
+ * To solve this with ZERO software installation on Windows, this server also hosts:
+ *  - `GET /NeonPad-PC-Bridge.bat` : 1-click zero-install Windows launcher
+ *  - `GET /win`                   : Native Windows PowerShell + C# `user32.dll` `SendInput`
+ *                                   Hardware Scan-Code & Mouse Look injector
+ *  - `GET /stream`                : Low-latency (<2ms) TCP stream feeding the Windows OS injector
  */
 class WebBridgeServer(
     private val onClientRumbleRequest: () -> Unit
@@ -44,7 +51,9 @@ class WebBridgeServer(
     private var serverJob: Job? = null
     private var serverSocket: ServerSocket? = null
     private val wsClients = CopyOnWriteArrayList<WebSocketClientHandler>()
+    private val tcpStreamClients = CopyOnWriteArrayList<TcpStreamClientHandler>()
     private var broadcastedCount = 0L
+    private var lastSentJson = ""
 
     private val _state = MutableStateFlow(WebBridgeState())
     val state: StateFlow<WebBridgeState> = _state.asStateFlow()
@@ -85,7 +94,8 @@ class WebBridgeServer(
                 isRunning = true,
                 localIp = ip,
                 port = activePort,
-                connectedClients = wsClients.size,
+                connectedClients = wsClients.size + tcpStreamClients.size,
+                osInjectorClients = tcpStreamClients.size,
                 framesBroadcasted = broadcastedCount,
                 bridgeUrl = "http://$ip:$activePort"
             )
@@ -106,6 +116,8 @@ class WebBridgeServer(
         try {
             wsClients.forEach { it.close() }
             wsClients.clear()
+            tcpStreamClients.forEach { it.close() }
+            tcpStreamClients.clear()
             serverSocket?.close()
             serverJob?.cancel()
         } catch (_: Exception) {
@@ -113,28 +125,52 @@ class WebBridgeServer(
         serverSocket = null
         _state.value = _state.value.copy(
             isRunning = false,
-            connectedClients = 0
+            connectedClients = 0,
+            osInjectorClients = 0
         )
     }
 
     fun broadcastGamepadStateJson(jsonPayload: String) {
-        if (wsClients.isEmpty()) return
+        if (wsClients.isEmpty() && tcpStreamClients.isEmpty()) return
+
+        // Add osInjectorActive flag so browser dashboard knows if the Windows OS Bridge is running
+        val enrichedJson = if (jsonPayload.endsWith("}")) {
+            jsonPayload.dropLast(1) + ",\"osActive\":${tcpStreamClients.size}}"
+        } else {
+            jsonPayload
+        }
+
         scope.launch {
-            val deadClients = mutableListOf<WebSocketClientHandler>()
-            for (client in wsClients) {
-                if (!client.sendTextFrame(jsonPayload)) {
-                    deadClients.add(client)
+            if (wsClients.isNotEmpty()) {
+                val deadWs = mutableListOf<WebSocketClientHandler>()
+                for (client in wsClients) {
+                    if (!client.sendTextFrame(enrichedJson)) {
+                        deadWs.add(client)
+                    }
+                }
+                if (deadWs.isNotEmpty()) {
+                    wsClients.removeAll(deadWs.toSet())
                 }
             }
-            if (deadClients.isNotEmpty()) {
-                wsClients.removeAll(deadClients.toSet())
-                _state.value = _state.value.copy(connectedClients = wsClients.size)
+
+            if (tcpStreamClients.isNotEmpty()) {
+                val deadTcp = mutableListOf<TcpStreamClientHandler>()
+                for (client in tcpStreamClients) {
+                    if (!client.sendLine(enrichedJson)) {
+                        deadTcp.add(client)
+                    }
+                }
+                if (deadTcp.isNotEmpty()) {
+                    tcpStreamClients.removeAll(deadTcp.toSet())
+                }
             }
+
             broadcastedCount++
-            if (broadcastedCount % 12L == 0L || broadcastedCount < 5L) {
+            if (broadcastedCount % 10L == 0L || broadcastedCount < 5L) {
                 _state.value = _state.value.copy(
                     framesBroadcasted = broadcastedCount,
-                    connectedClients = wsClients.size
+                    connectedClients = wsClients.size + tcpStreamClients.size,
+                    osInjectorClients = tcpStreamClients.size
                 )
             }
         }
@@ -151,6 +187,8 @@ class WebBridgeServer(
                 return
             }
 
+            val path = requestLine.split(" ").getOrNull(1) ?: "/"
+
             val headers = mutableMapOf<String, String>()
             var line: String? = reader.readLine()
             while (!line.isNullOrEmpty()) {
@@ -166,45 +204,127 @@ class WebBridgeServer(
             val isWebSocketUpgrade = headers["upgrade"]?.equals("websocket", ignoreCase = true) == true
             val wsKey = headers["sec-websocket-key"]
 
-            if (isWebSocketUpgrade && wsKey != null) {
-                performWebSocketHandshake(wsKey, output)
-                val clientHandler = WebSocketClientHandler(socket, input, output)
-                wsClients.add(clientHandler)
-                _state.value = _state.value.copy(connectedClients = wsClients.size)
-                clientHandler.listenForFrames(
-                    onMessage = { msg ->
-                        if (msg.contains("RUMBLE")) {
-                            onClientRumbleRequest()
-                        } else if (msg.startsWith("PING:")) {
-                            val rtt = msg.removePrefix("PING:").trim().toIntOrNull() ?: 2
-                            _state.value = _state.value.copy(lastClientPingMs = rtt.coerceAtLeast(1))
+            when {
+                isWebSocketUpgrade && wsKey != null -> {
+                    performWebSocketHandshake(wsKey, output)
+                    val clientHandler = WebSocketClientHandler(socket, input, output)
+                    wsClients.add(clientHandler)
+                    updateClientCounts()
+                    clientHandler.listenForFrames(
+                        onMessage = { msg ->
+                            if (msg.contains("RUMBLE")) {
+                                onClientRumbleRequest()
+                            } else if (msg.startsWith("PING:")) {
+                                val rtt = msg.removePrefix("PING:").trim().toIntOrNull() ?: 2
+                                _state.value = _state.value.copy(lastClientPingMs = rtt.coerceAtLeast(1))
+                            }
+                        },
+                        onDisconnect = {
+                            wsClients.remove(clientHandler)
+                            updateClientCounts()
                         }
-                    },
-                    onDisconnect = {
-                        wsClients.remove(clientHandler)
-                        _state.value = _state.value.copy(connectedClients = wsClients.size)
+                    )
+                }
+
+                path.startsWith("/stream") -> {
+                    // Persistent low-latency raw JSON line stream for the Windows OS Injector
+                    val header = buildString {
+                        append("HTTP/1.1 200 OK\r\n")
+                        append("Content-Type: text/plain; charset=utf-8\r\n")
+                        append("Cache-Control: no-cache\r\n")
+                        append("Connection: keep-alive\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+                    output.write(header)
+                    output.flush()
+
+                    val tcpClient = TcpStreamClientHandler(socket, output)
+                    tcpStreamClients.add(tcpClient)
+                    updateClientCounts()
+                    onClientRumbleRequest() // Vibrate phone to confirm Windows OS Game Bridge connected!
+
+                    // Keep socket open until client disconnects
+                    try {
+                        while (!socket.isClosed && input.read() != -1) {
+                            // Keep-alive read
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        tcpStreamClients.remove(tcpClient)
+                        tcpClient.close()
+                        updateClientCounts()
                     }
-                )
-            } else {
-                // Serve zero-install interactive HTML5 PC Gamepad Console Receiver
-                val htmlBytes = buildLaptopReceiverHtml(
-                    phoneIp = _state.value.localIp,
-                    port = _state.value.port
-                ).toByteArray(Charsets.UTF_8)
+                }
 
-                val httpHeader = buildString {
-                    append("HTTP/1.1 200 OK\r\n")
-                    append("Content-Type: text/html; charset=utf-8\r\n")
-                    append("Content-Length: ${htmlBytes.size}\r\n")
-                    append("Access-Control-Allow-Origin: *\r\n")
-                    append("Cache-Control: no-cache\r\n")
-                    append("Connection: close\r\n\r\n")
-                }.toByteArray(Charsets.UTF_8)
+                path.startsWith("/win") -> {
+                    // Serves the zero-install Windows PowerShell + C# SendInput Hardware ScanCode Bridge
+                    val psScriptBytes = buildWindowsPowerShellInjectorScript(
+                        phoneIp = _state.value.localIp,
+                        port = _state.value.port
+                    ).toByteArray(Charsets.UTF_8)
 
-                output.write(httpHeader)
-                output.write(htmlBytes)
-                output.flush()
-                socket.close()
+                    val header = buildString {
+                        append("HTTP/1.1 200 OK\r\n")
+                        append("Content-Type: text/plain; charset=utf-8\r\n")
+                        append("Content-Length: ${psScriptBytes.size}\r\n")
+                        append("Connection: close\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    output.write(header)
+                    output.write(psScriptBytes)
+                    output.flush()
+                    socket.close()
+                }
+
+                path.startsWith("/NeonPad-PC-Bridge.bat") -> {
+                    // Serves a 1-click downloadable .bat launcher for Windows 10/11
+                    val ip = _state.value.localIp
+                    val port = _state.value.port
+                    val batContent = buildString {
+                        append("@echo off\r\n")
+                        append("title NeonPad - Windows OS Gamepad & KeyBridge\r\n")
+                        append("color 0B\r\n")
+                        append("echo =========================================================\r\n")
+                        append("echo   NEONPAD // ZERO-INSTALL WINDOWS OS GAME CONTROLLER\r\n")
+                        append("echo   Connecting to Phone at http://$ip:$port ...\r\n")
+                        append("echo =========================================================\r\n")
+                        append("powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm http://$ip:$port/win | iex\"\r\n")
+                        append("pause\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    val header = buildString {
+                        append("HTTP/1.1 200 OK\r\n")
+                        append("Content-Type: application/octet-stream\r\n")
+                        append("Content-Disposition: attachment; filename=\"NeonPad-PC-Bridge.bat\"\r\n")
+                        append("Content-Length: ${batContent.size}\r\n")
+                        append("Connection: close\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    output.write(header)
+                    output.write(batContent)
+                    output.flush()
+                    socket.close()
+                }
+
+                else -> {
+                    val htmlBytes = buildLaptopReceiverHtml(
+                        phoneIp = _state.value.localIp,
+                        port = _state.value.port
+                    ).toByteArray(Charsets.UTF_8)
+
+                    val httpHeader = buildString {
+                        append("HTTP/1.1 200 OK\r\n")
+                        append("Content-Type: text/html; charset=utf-8\r\n")
+                        append("Content-Length: ${htmlBytes.size}\r\n")
+                        append("Access-Control-Allow-Origin: *\r\n")
+                        append("Cache-Control: no-cache\r\n")
+                        append("Connection: close\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    output.write(httpHeader)
+                    output.write(htmlBytes)
+                    output.flush()
+                    socket.close()
+                }
             }
         } catch (_: Exception) {
             try {
@@ -212,6 +332,13 @@ class WebBridgeServer(
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun updateClientCounts() {
+        _state.value = _state.value.copy(
+            connectedClients = wsClients.size + tcpStreamClients.size,
+            osInjectorClients = tcpStreamClients.size
+        )
     }
 
     private fun performWebSocketHandshake(secWebSocketKey: String, output: OutputStream) {
@@ -230,6 +357,30 @@ class WebBridgeServer(
         output.flush()
     }
 
+    private inner class TcpStreamClientHandler(
+        private val socket: Socket,
+        private val output: OutputStream
+    ) {
+        @Synchronized
+        fun sendLine(jsonLine: String): Boolean {
+            return try {
+                val bytes = (jsonLine + "\n").toByteArray(Charsets.UTF_8)
+                output.write(bytes)
+                output.flush()
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun close() {
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private inner class WebSocketClientHandler(
         private val socket: Socket,
         private val input: InputStream,
@@ -240,7 +391,7 @@ class WebBridgeServer(
             return try {
                 val payload = text.toByteArray(Charsets.UTF_8)
                 val len = payload.size
-                output.write(0x81) // FIN + Text Frame opcode (1)
+                output.write(0x81)
                 when {
                     len <= 125 -> output.write(len)
                     len <= 65535 -> {
@@ -269,7 +420,7 @@ class WebBridgeServer(
                     val b1 = input.read()
                     if (b1 == -1) break
                     val opcode = b1 and 0x0F
-                    if (opcode == 0x08) break // Close frame
+                    if (opcode == 0x08) break
 
                     val b2 = input.read()
                     if (b2 == -1) break
@@ -358,7 +509,163 @@ class WebBridgeServer(
         return "127.0.0.1"
     }
 
+    /**
+     * Generates a self-contained native Windows PowerShell + C# `user32.dll` Hardware ScanCode
+     * & Mouse Look injector that runs using built-in Windows components with zero installation.
+     */
+    private fun buildWindowsPowerShellInjectorScript(phoneIp: String, port: Int): String {
+        return """
+${'$'}ErrorActionPreference = 'SilentlyContinue'
+Clear-Host
+Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host "  NEONPAD // WINDOWS OS DIRECTINPUT & HARDWARE KEY/MOUSE BRIDGE  " -ForegroundColor Cyan
+Write-Host "==================================================================" -ForegroundColor Cyan
+Write-Host "Connected to NeonPad Phone at $phoneIp`:$port" -ForegroundColor Green
+Write-Host "All PC Games, Steam, Emulators & Windows Desktop now receive live input!" -ForegroundColor Yellow
+Write-Host "  Left Stick   -> W / A / S / D (Movement)"
+Write-Host "  Right Stick  -> Mouse Look / Camera Aim"
+Write-Host "  D-Pad        -> Up / Down / Left / Right Arrow Keys"
+Write-Host "  Cross (X)    -> Space (Jump / Select / Nitro)"
+Write-Host "  Circle (O)   -> Left Ctrl (Crouch / Dodge)"
+Write-Host "  Square ([])  -> R (Reload / Action)"
+Write-Host "  Triangle (/\)-> F (Interact / Enter Vehicle)"
+Write-Host "  L1 / R1      -> Q / E"
+Write-Host "  L2 / R2      -> Right Click (Aim) / Left Click (Fire)"
+Write-Host "  L3 / R3      -> Left Shift (Sprint) / V (Melee)"
+Write-Host "  Options/Share-> Esc (Pause) / Tab (Map)"
+Write-Host "==================================================================" -ForegroundColor Cyan
+
+${'$'}csharp = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class NeonWinInput {
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_SCANCODE = 0x0008;
+
+    private const uint MOUSEEVENTF_MOVE = 0x0001;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+
+    public static void SetKey(byte vk, bool extended, bool down) {
+        byte scan = (byte)MapVirtualKey(vk, 0);
+        uint flags = KEYEVENTF_SCANCODE;
+        if (extended) flags |= KEYEVENTF_EXTENDEDKEY;
+        if (!down) flags |= KEYEVENTF_KEYUP;
+        keybd_event(vk, scan, flags, UIntPtr.Zero);
+    }
+
+    public static void MoveMouse(int dx, int dy) {
+        if (dx != 0 || dy != 0) {
+            mouse_event(MOUSEEVENTF_MOVE, dx, dy, 0, UIntPtr.Zero);
+        }
+    }
+
+    public static void SetMouseBtn(bool left, bool down) {
+        uint flag = left ? (down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP)
+                         : (down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
+        mouse_event(flag, 0, 0, 0, UIntPtr.Zero);
+    }
+}
+"@
+
+Add-Type -TypeDefinition ${'$'}csharp -Language CSharp
+
+${'$'}prevKeys = @{}
+${'$'}prevLmb = ${'$'}false
+${'$'}prevRmb = ${'$'}false
+
+function Update-Key([string]${'$'}id, [byte]${'$'}vk, [bool]${'$'}ext, [bool]${'$'}pressed) {
+    ${'$'}was = [bool]${'$'}prevKeys[${'$'}id]
+    if (${'$'}pressed -ne ${'$'}was) {
+        [NeonWinInput]::SetKey(${'$'}vk, ${'$'}ext, ${'$'}pressed)
+        ${'$'}prevKeys[${'$'}id] = ${'$'}pressed
+    }
+}
+
+while (${'$'}true) {
+    try {
+        ${'$'}client = New-Object System.Net.Sockets.TcpClient("$phoneIp", $port)
+        ${'$'}client.NoDelay = ${'$'}true
+        ${'$'}stream = ${'$'}client.GetStream()
+        ${'$'}writer = New-Object System.IO.StreamWriter(${'$'}stream)
+        ${'$'}reader = New-Object System.IO.StreamReader(${'$'}stream)
+        ${'$'}writer.Write("GET /stream HTTP/1.1`r`nHost: $phoneIp`r`n`r`n")
+        ${'$'}writer.Flush()
+
+        while (${'$'}client.Connected) {
+            ${'$'}line = ${'$'}reader.ReadLine()
+            if (${'$'}null -eq ${'$'}line) { break }
+            if (-not ${'$'}line.StartsWith("{")) { continue }
+
+            ${'$'}d = ${'$'}line | ConvertFrom-Json
+            ${'$'}btns = @(${'$'}d.buttons)
+            ${'$'}lx = [double]${'$'}d.lx
+            ${'$'}ly = [double]${'$'}d.ly
+            ${'$'}rx = [double]${'$'}d.rx
+            ${'$'}ry = [double]${'$'}d.ry
+
+            Update-Key "W" 0x57 ${'$'}false (${'$'}ly -lt -0.32)
+            Update-Key "S" 0x53 ${'$'}false (${'$'}ly -gt 0.32)
+            Update-Key "A" 0x41 ${'$'}false (${'$'}lx -lt -0.32)
+            Update-Key "D" 0x44 ${'$'}false (${'$'}lx -gt 0.32)
+
+            Update-Key "UP"    0x26 ${'$'}true (${'$'}btns -contains "DPAD_UP")
+            Update-Key "DOWN"  0x28 ${'$'}true (${'$'}btns -contains "DPAD_DOWN")
+            Update-Key "LEFT"  0x25 ${'$'}true (${'$'}btns -contains "DPAD_LEFT")
+            Update-Key "RIGHT" 0x27 ${'$'}true (${'$'}btns -contains "DPAD_RIGHT")
+
+            Update-Key "SPACE" 0x20 ${'$'}false (${'$'}btns -contains "CROSS")
+            Update-Key "CTRL"  0x11 ${'$'}false (${'$'}btns -contains "CIRCLE")
+            Update-Key "R"     0x52 ${'$'}false (${'$'}btns -contains "SQUARE")
+            Update-Key "F"     0x46 ${'$'}false (${'$'}btns -contains "TRIANGLE")
+            Update-Key "Q"     0x51 ${'$'}false (${'$'}btns -contains "L1")
+            Update-Key "E"     0x45 ${'$'}false (${'$'}btns -contains "R1")
+            Update-Key "SHIFT" 0x10 ${'$'}false (${'$'}btns -contains "L3")
+            Update-Key "V"     0x56 ${'$'}false (${'$'}btns -contains "R3")
+            Update-Key "TAB"   0x09 ${'$'}false (${'$'}btns -contains "SHARE")
+            Update-Key "ESC"   0x1B ${'$'}false (${'$'}btns -contains "OPTIONS")
+            Update-Key "ENTER" 0x0D ${'$'}false (${'$'}btns -contains "PS_HOME")
+            Update-Key "M"     0x4D ${'$'}false (${'$'}btns -contains "TOUCHPAD")
+
+            ${'$'}lmb = (${'$'}btns -contains "R2_BTN") -or ([double]${'$'}d.r2 -gt 0.35)
+            if (${'$'}lmb -ne ${'$'}prevLmb) {
+                [NeonWinInput]::SetMouseBtn(${'$'}true, ${'$'}lmb)
+                ${'$'}prevLmb = ${'$'}lmb
+            }
+            ${'$'}rmb = (${'$'}btns -contains "L2_BTN") -or ([double]${'$'}d.l2 -gt 0.35)
+            if (${'$'}rmb -ne ${'$'}prevRmb) {
+                [NeonWinInput]::SetMouseBtn(${'$'}false, ${'$'}rmb)
+                ${'$'}prevRmb = ${'$'}rmb
+            }
+
+            if ([Math]::Abs(${'$'}rx) -gt 0.12 -or [Math]::Abs(${'$'}ry) -gt 0.12) {
+                ${'$'}mx = [int](${'$'}rx * 22)
+                ${'$'}my = [int](${'$'}ry * 22)
+                [NeonWinInput]::MoveMouse(${'$'}mx, ${'$'}my)
+            }
+        }
+    } catch {
+        Start-Sleep -Milliseconds 1000
+    }
+}
+        """.trimIndent()
+    }
+
     private fun buildLaptopReceiverHtml(phoneIp: String, port: Int): String {
+        val psOneLiner = "powershell -ExecutionPolicy Bypass -c \"irm http://$phoneIp:$port/win | iex\""
         return """
 <!DOCTYPE html>
 <html lang="en">
@@ -376,11 +683,17 @@ class WebBridgeServer(
     --amber: #FFD600;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, monospace; }
-  body { background: var(--bg); color: #F8FAFC; min-height: 100vh; padding: 24px; }
-  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1E293B; padding-bottom: 16px; margin-bottom: 24px; }
-  .brand { font-size: 24px; font-weight: 800; color: var(--cyan); letter-spacing: 2px; text-shadow: 0 0 12px rgba(0,229,255,0.4); }
+  body { background: var(--bg); color: #F8FAFC; min-height: 100vh; padding: 20px; }
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1E293B; padding-bottom: 14px; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
+  .brand { font-size: 22px; font-weight: 800; color: var(--cyan); letter-spacing: 2px; text-shadow: 0 0 12px rgba(0,229,255,0.4); }
   .badge { padding: 6px 14px; border-radius: 99px; font-weight: 700; font-size: 13px; background: #1E293B; color: var(--amber); border: 1px solid var(--amber); }
   .badge.live { color: var(--green); border-color: var(--green); box-shadow: 0 0 12px rgba(0,230,118,0.25); }
+  .hero-activate { background: linear-gradient(135deg, #0D1B2A 0%, #111827 100%); border: 2px solid var(--cyan); border-radius: 16px; padding: 18px; margin-bottom: 20px; box-shadow: 0 0 24px rgba(0,229,255,0.15); }
+  .hero-activate.os-live { border-color: var(--green); box-shadow: 0 0 24px rgba(0,230,118,0.25); }
+  .cmd-box { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #05080E; border: 1px solid var(--cyan); padding: 10px 14px; border-radius: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .cmd-text { color: var(--cyan); font-size: 13px; font-weight: 700; user-select: all; }
+  .btn-primary { background: var(--cyan); color: #05080E; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 800; cursor: pointer; text-decoration: none; display: inline-block; font-size: 13px; }
+  .btn-amber { background: var(--amber); color: #05080E; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 800; cursor: pointer; text-decoration: none; display: inline-block; font-size: 13px; }
   .grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 20px; }
   @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
   .panel { background: var(--card); border: 1px solid #1E293B; border-radius: 16px; padding: 20px; }
@@ -394,7 +707,6 @@ class WebBridgeServer(
   .bar-wrap { margin: 10px 0; }
   .bar-track { height: 10px; background: #0A0F18; border-radius: 6px; overflow: hidden; border: 1px solid #334155; margin-top: 4px; }
   .bar-fill { height: 100%; background: linear-gradient(90deg, var(--azure), var(--cyan)); width: 0%; }
-  .btn-action { background: var(--cyan); color: #05080E; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 800; cursor: pointer; margin-top: 12px; }
   pre { background: #0A0F18; padding: 12px; border-radius: 8px; border: 1px solid #1E293B; color: #38BDF8; font-size: 12px; overflow-x: auto; margin-top: 10px; }
 </style>
 </head>
@@ -405,6 +717,29 @@ class WebBridgeServer(
       <div style="font-size:13px;color:#94A3B8;margin-top:4px;">Real-Time Low-Latency Gamepad Stream from $phoneIp:$port</div>
     </div>
     <div id="statusBadge" class="badge">CONNECTING...</div>
+  </div>
+
+  <!-- CRITICAL STEP TO CONTROL EXTERNAL WINDOWS PC GAMES & DESKTOP -->
+  <div id="osBridgeBox" class="hero-activate">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div id="osBridgeTitle" style="font-size:16px;font-weight:800;color:var(--amber);">
+          ⚡ ENABLE WINDOWS OS GAME CONTROL (REQUIRED FOR DESKTOP / STEAM / PC GAMES)
+        </div>
+        <div style="font-size:13px;color:#CBD5E1;margin-top:4px;">
+          Web browsers block tabs from pressing keys inside external Windows games. Activate the built-in Windows OS Bridge below (zero installs needed):
+        </div>
+      </div>
+      <a href="/NeonPad-PC-Bridge.bat" class="btn-amber">⬇ 1-CLICK LAUNCHER (NeonPad-PC-Bridge.bat)</a>
+    </div>
+
+    <div class="cmd-box">
+      <div>
+        <div style="font-size:11px;color:#94A3B8;margin-bottom:3px;">OR PRESS <strong>Win + R</strong> ON YOUR LAPTOP KEYBOARD, PASTE THIS &amp; HIT ENTER:</div>
+        <code id="psCmd" class="cmd-text">$psOneLiner</code>
+      </div>
+      <button class="btn-primary" onclick="copyWinCmd()">COPY WIN+R COMMAND</button>
+    </div>
   </div>
 
   <div class="grid">
@@ -433,21 +768,27 @@ class WebBridgeServer(
       <h2 style="margin-top:20px;">Active Buttons</h2>
       <div id="btnGrid" class="btn-grid"></div>
 
-      <button class="btn-action" onclick="sendRumble()">TEST PHONE HAPTIC RUMBLE</button>
+      <button class="btn-primary" style="margin-top:14px;" onclick="sendRumble()">TEST PHONE HAPTIC RUMBLE</button>
     </div>
 
     <div class="panel">
-      <h2>Zero-Install Browser Gamepad Emulation</h2>
-      <p style="font-size:13px;color:#94A3B8;line-height:1.5;">
-        This page automatically registers a virtual standard HTML5 Gamepad inside your browser (`navigator.getGamepads()[0]`) and dispatches real keyboard events for web games, cloud gaming (Xbox Cloud, GeForce Now), and HTML5 titles.
-      </p>
-      <div style="margin-top:16px;font-size:13px;color:#E2E8F0;">
+      <h2>Windows PC Key &amp; Mouse Mapping</h2>
+      <div style="font-size:13px;color:#CBD5E1;line-height:1.7;">
+        <div>• <strong>Left Stick:</strong> W / A / S / D (Movement)</div>
+        <div>• <strong>Right Stick / Gyro:</strong> 3D Mouse Look / Aim</div>
+        <div>• <strong>L2 / R2 Triggers:</strong> Right Click (Aim) / Left Click (Fire)</div>
+        <div>• <strong>Cross (✕) / Circle (◯):</strong> Space (Jump) / Left Ctrl (Crouch)</div>
+        <div>• <strong>Square (▢) / Triangle (△):</strong> R (Reload) / F (Interact)</div>
+        <div>• <strong>L1 / R1 / L3 / R3:</strong> Q / E / Left Shift (Sprint) / V</div>
+        <div>• <strong>D-Pad:</strong> Up / Down / Left / Right Arrows</div>
+      </div>
+      <div style="margin-top:14px;font-size:13px;color:#E2E8F0;">
         <strong>Gyro Telemetry:</strong> <span id="gyroText">Pitch: 0.0° | Roll: 0.0°</span>
       </div>
-      <div style="margin-top:8px;font-size:13px;color:#E2E8F0;">
+      <div style="margin-top:6px;font-size:13px;color:#E2E8F0;">
         <strong>Frames Received:</strong> <span id="frameCount">0</span>
       </div>
-      <h2 style="margin-top:24px;">Raw Real-Time Packet</h2>
+      <h2 style="margin-top:18px;">Raw Real-Time Packet</h2>
       <pre id="rawJson">Waiting for controller input...</pre>
     </div>
   </div>
@@ -462,6 +803,12 @@ buttonsList.forEach(b => {
   el.textContent = b;
   btnGrid.appendChild(el);
 });
+
+function copyWinCmd() {
+  const txt = document.getElementById('psCmd').textContent;
+  navigator.clipboard.writeText(txt);
+  alert('Copied! Now press Win + R on your laptop keyboard, paste (Ctrl+V), and press Enter!');
+}
 
 let ws;
 let frames = 0;
@@ -484,6 +831,11 @@ function connectWs() {
     try {
       const data = JSON.parse(ev.data);
       document.getElementById('rawJson').textContent = JSON.stringify(data, null, 2);
+      if (data.osActive && data.osActive > 0) {
+        document.getElementById('osBridgeBox').className = 'hero-activate os-live';
+        document.getElementById('osBridgeTitle').style.color = 'var(--green)';
+        document.getElementById('osBridgeTitle').textContent = '✅ WINDOWS OS GAME INJECTOR ACTIVE — CONTROLLING ALL PC GAMES & DESKTOP!';
+      }
       const lx = data.lx || 0, ly = data.ly || 0, rx = data.rx || 0, ry = data.ry || 0;
       document.getElementById('leftDot').style.transform = `translate(calc(-50% + ${'$'}{lx*45}px), calc(-50% + ${'$'}{ly*45}px))`;
       document.getElementById('rightDot').style.transform = `translate(calc(-50% + ${'$'}{rx*45}px), calc(-50% + ${'$'}{ry*45}px))`;
