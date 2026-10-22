@@ -1,0 +1,6 @@
+{
+  "name": "NeonPad",
+  "description": "Low-latency Bluetooth HID and Wi-Fi Web Bridge PC gaming controller with PlayStation layout, motion gyro aiming, custom button mapping, turbo macros, and tactile haptic feedback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

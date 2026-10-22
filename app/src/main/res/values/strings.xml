@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">NeonPad</string>
+    <string name="console_subtitle">DIGITAL PC GAMEPAD &amp; CONSOLE</string>
+    <string name="bt_hid_mode">Bluetooth HID Gamepad</string>
+    <string name="web_bridge_mode">Wi-Fi Web Bridge</string>
+    <string name="status_connected">CONNECTED</string>
+    <string name="status_ready">READY TO PAIR</string>
+    <string name="status_advertising">DISCOVERABLE</string>
+    <string name="gyro_aim">GYRO AIM</string>
+    <string name="turbo_mode">TURBO</string>
+    <string name="layout_editor">LAYOUT</string>
+    <string name="settings_hud">CONSOLE HUD</string>
+    <string name="reset_layout">Reset Defaults</string>
+    <string name="save_layout">Save Layout</string>
+    <string name="haptic_strength">Haptic Feedback Intensity</string>
+    <string name="bluetooth_permission_rationale">Bluetooth Connect &amp; Advertise permissions are required to register your phone as a native Bluetooth HID Gamepad for Windows.</string>
+</resources>
